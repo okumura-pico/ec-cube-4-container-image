@@ -15,34 +15,34 @@ BUILD_ARGS = --build-arg PHP=$(PHP) \
 .DEFAULT_GOAL := help
 .PHONY: help build rebuild run stop logs shell size clean
 
-help: ## このヘルプを表示
+help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-10s\033[0m %s\n", $$1, $$2}'
 	@echo ""
-	@echo "  変数: IMAGE=$(IMAGE) TAG=$(TAG) PHP=$(PHP) ECCUBE=$(ECCUBE) PORT=$(PORT)"
+	@echo "  Variables: IMAGE=$(IMAGE) TAG=$(TAG) PHP=$(PHP) ECCUBE=$(ECCUBE) PORT=$(PORT)"
 
-build: ## イメージをビルド (IMAGE:TAG と IMAGE:latest)
+build: ## Build the image (tagged IMAGE:TAG and IMAGE:latest)
 	docker build $(BUILD_ARGS) -t $(IMAGE):$(TAG) -t $(IMAGE):latest .
 
-rebuild: ## キャッシュを使わずにビルド (ベースイメージも再取得)
+rebuild: ## Build without cache (also pulls the base image)
 	docker build --pull --no-cache $(BUILD_ARGS) -t $(IMAGE):$(TAG) -t $(IMAGE):latest .
 
-run: stop ## コンテナを起動 (ENV_FILE の環境変数を使用, http://localhost:PORT/)
-	@test -f $(ENV_FILE) || { echo "$(ENV_FILE) がありません (eccube.env.sample をコピーして作成)"; exit 1; }
+run: stop ## Start the container with variables from ENV_FILE (http://localhost:PORT/)
+	@test -f $(ENV_FILE) || { echo "$(ENV_FILE) not found (copy eccube.env.sample to create it)"; exit 1; }
 	docker run -d --name $(CONTAINER) -p $(PORT):80 --env-file $(ENV_FILE) $(IMAGE):$(TAG)
 	@echo "http://localhost:$(PORT)/"
 
-stop: ## コンテナを停止・削除
+stop: ## Stop and remove the container
 	-@docker rm -f $(CONTAINER) >/dev/null 2>&1 || true
 
-logs: ## コンテナのログを表示
+logs: ## Follow container logs
 	docker logs -f $(CONTAINER)
 
-shell: ## 起動中のコンテナに入る
+shell: ## Open a shell in the running container
 	docker exec -it $(CONTAINER) bash
 
-size: ## イメージサイズとレイヤー内訳を表示
+size: ## Show image size and layer breakdown
 	@docker images $(IMAGE):$(TAG) --format '{{.Repository}}:{{.Tag}}  {{.Size}}'
 	@docker history $(IMAGE):$(TAG) --format '{{.Size}}\t{{.CreatedBy}}' | awk -F'\t' '$$1 != "0B"' | cut -c1-100
 
-clean: stop ## コンテナとイメージを削除
+clean: stop ## Remove the container and images
 	-docker rmi $(IMAGE):$(TAG) $(IMAGE):latest

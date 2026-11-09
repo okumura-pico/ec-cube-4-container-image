@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
-# EC-CUBE 4.3 は PHP 8.1〜8.3 をサポート (8-apache だと 8.4 以降になるため明示)
+# EC-CUBE 4.3 supports PHP 8.1-8.3 (pinned explicitly; 8-apache would resolve to 8.4+)
 ARG PHP=8.3-apache
 ARG ECCUBE=4.3.1-p1
-# ECCUBE を変更した場合は tar.gz の sha256 も合わせて変更すること
+# Update this sha256 together with ECCUBE when changing the version
 ARG ECCUBE_SHA256=5783ae3598a902a4bce1d59ea8592281f02f5306d253944dfb45c8cb58680ab4
 
 # -------------------------------------------
@@ -21,7 +21,7 @@ RUN set -eux; \
 #
 FROM php-ext AS eccube
 
-# FROM より前の ARG はステージ内では使えないので再宣言
+# ARGs declared before FROM are not visible inside a stage, so redeclare them
 ARG ECCUBE
 ARG ECCUBE_SHA256
 
@@ -31,10 +31,10 @@ ADD --checksum=sha256:${ECCUBE_SHA256} \
     https://github.com/EC-CUBE/ec-cube/releases/download/${ECCUBE}/eccube-${ECCUBE}.tar.gz \
     /tmp/eccube.tar.gz
 
-# 同梱プラグイン (type: eccube-plugin, tar ball の app/Plugin 配下に展開済み) は
-# ec-cube/plugin-installer が composer からのインストールを拒否するため、
-# composer.lock から「インストール済み」として vendor/composer/installed.json を作っておく。
-# plugin-installer 自体も先に入れておかないと app/Plugin 配下を認識できない。
+# Bundled plugins (type: eccube-plugin, already extracted under app/Plugin from the tarball)
+# cannot be installed by composer because ec-cube/plugin-installer refuses it.
+# So generate vendor/composer/installed.json from composer.lock marking them as installed.
+# plugin-installer itself must also be present beforehand so composer resolves app/Plugin paths.
 COPY <<'EOF' /usr/local/bin/seed-installed.php
 <?php
 $lock = json_decode(file_get_contents('composer.lock'), true);
@@ -68,12 +68,12 @@ RUN set -eux; \
     composer --working-dir=/tmp/pi require --no-plugins --no-scripts --no-interaction --no-progress "ec-cube/plugin-installer:${PI_VERSION}"; \
     mkdir -p vendor/ec-cube; \
     mv /tmp/pi/vendor/ec-cube/plugin-installer vendor/ec-cube/; \
-    # google/apiclient-services (約 185MB) は SiteKit42 が使うサービスだけ残す (google/apiclient 公式の cleanup 機能)
+    # Keep only the google/apiclient-services (~185MB) used by SiteKit42 (official google/apiclient cleanup)
     composer config extra.google/apiclient-services --json '["SiteVerification", "Webmasters"]'; \
     composer config scripts.pre-autoload-dump 'Google\Task\Composer::cleanup'; \
     composer install --no-dev --optimize-autoloader --no-interaction --no-progress; \
-    # post-install スクリプトが作る .env / sqlite DB は不要。
-    # .env.install / .env.dist も消し、環境変数の渡し忘れ時にインストーラが起動しないようにする
+    # .env / sqlite DB created by post-install scripts are not needed.
+    # Also remove .env.install / .env.dist so the web installer never starts if env vars are missing
     rm -rf .env .env.install .env.dist var/eccube.db var/cache/* var/log/* app/Plugin/.composer/cache/*
 
 # -------------------------------------------
@@ -92,25 +92,25 @@ RUN set -eux; \
     docker-php-ext-enable mysqli gd zip intl pdo_mysql opcache; \
     php -m
 
-# EC-CUBE 同梱の .htaccess が Order/Allow/Deny を使うため access_compat (依存: authn_core) と authz_host は有効化する
+# access_compat (requires authn_core) and authz_host are needed because EC-CUBE's .htaccess uses Order/Allow/Deny
 RUN set -eux; \
     a2enmod access_compat authz_host headers remoteip rewrite; \
     a2dismod -f auth_basic authn_file authz_user autoindex status; \
     a2disconf serve-cgi-bin
 
-# 公開不要なファイル・ディレクトリは 403 ではなく 404 を返して存在を隠す。
-# ファイルの有無ではなく URL パターンだけで判定するため、実在するかどうか区別できない。
-# (mod_alias は .htaccess のアクセス制御より前に処理される)
+# Return 404 instead of 403 for non-public files/directories to hide their existence.
+# Matching is by URL pattern only (not file existence), so existing and missing files are indistinguishable.
+# (mod_alias runs before the .htaccess access control)
 COPY <<'EOF' /etc/apache2/conf-available/hide-files.conf
-# ドットファイル・ドットディレクトリ (.env, .env.*, .htaccess, .git, .maintenance, app/Plugin/.composer ...)
+# Dotfiles and dot-directories (.env, .env.*, .htaccess, .git, .maintenance, app/Plugin/.composer ...)
 RedirectMatch 404 "/\.(?!well-known/)"
-# EC-CUBE の内部ディレクトリ
+# EC-CUBE internal directories
 RedirectMatch 404 "^/(app|bin|src|var|vendor|tests|node_modules|codeception|dockerbuild|gulp|zap)(/|$)"
-# ルート直下の内部ファイル
+# Internal files in the document root
 RedirectMatch 404 "^/(composer\.(json|lock)|symfony\.lock|COPYING|maintenance\.php)$"
-# 設定ファイル・テンプレート等の拡張子 (EC-CUBE 同梱 .htaccess の拒否対象と同じ)
+# Config/template extensions (same as those denied by EC-CUBE's bundled .htaccess)
 RedirectMatch 404 "\.(ini|lock|dist|git|sh|bak|swp|env|twig|yml|yaml|dockerignore|sample)$"
-# html/ 配下の PHP
+# PHP files under html/
 RedirectMatch 404 "^/html/.*\.php$"
 EOF
 RUN a2enconf hide-files
@@ -144,10 +144,10 @@ RUN set -eux; \
       -e 's|^max_execution_time = .*|max_execution_time = 120|' \
       "$PHP_INI_DIR/php.ini"
 
-# --chown 付き COPY なら chown 用の追加レイヤーが発生しない
+# COPY --chown avoids an extra layer for chown
 COPY --from=eccube --chown=www-data:www-data /app /var/www/html
 
-# .env は使わず環境変数で設定する (DATABASE_URL, ECCUBE_AUTH_MAGIC は起動時に必須)
+# Configured via environment variables instead of .env (DATABASE_URL and ECCUBE_AUTH_MAGIC are required at startup)
 ENV APP_ENV=prod \
     APP_DEBUG=0
 
