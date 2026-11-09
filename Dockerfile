@@ -72,8 +72,9 @@ RUN set -eux; \
     composer config extra.google/apiclient-services --json '["SiteVerification", "Webmasters"]'; \
     composer config scripts.pre-autoload-dump 'Google\Task\Composer::cleanup'; \
     composer install --no-dev --optimize-autoloader --no-interaction --no-progress; \
-    # post-install スクリプトが作る .env / sqlite DB を消して初回アクセス時にインストーラを起動させる
-    rm -rf .env var/eccube.db var/cache/* var/log/* app/Plugin/.composer/cache/*
+    # post-install スクリプトが作る .env / sqlite DB は不要。
+    # .env.install / .env.dist も消し、環境変数の渡し忘れ時にインストーラが起動しないようにする
+    rm -rf .env .env.install .env.dist var/eccube.db var/cache/* var/log/* app/Plugin/.composer/cache/*
 
 # -------------------------------------------
 # Live stage
@@ -96,6 +97,23 @@ RUN set -eux; \
     a2enmod access_compat authz_host headers remoteip rewrite; \
     a2dismod -f auth_basic authn_file authz_user autoindex status; \
     a2disconf serve-cgi-bin
+
+# 公開不要なファイル・ディレクトリは 403 ではなく 404 を返して存在を隠す。
+# ファイルの有無ではなく URL パターンだけで判定するため、実在するかどうか区別できない。
+# (mod_alias は .htaccess のアクセス制御より前に処理される)
+COPY <<'EOF' /etc/apache2/conf-available/hide-files.conf
+# ドットファイル・ドットディレクトリ (.env, .env.*, .htaccess, .git, .maintenance, app/Plugin/.composer ...)
+RedirectMatch 404 "/\.(?!well-known/)"
+# EC-CUBE の内部ディレクトリ
+RedirectMatch 404 "^/(app|bin|src|var|vendor|tests|node_modules|codeception|dockerbuild|gulp|zap)(/|$)"
+# ルート直下の内部ファイル
+RedirectMatch 404 "^/(composer\.(json|lock)|symfony\.lock|COPYING|maintenance\.php)$"
+# 設定ファイル・テンプレート等の拡張子 (EC-CUBE 同梱 .htaccess の拒否対象と同じ)
+RedirectMatch 404 "\.(ini|lock|dist|git|sh|bak|swp|env|twig|yml|yaml|dockerignore|sample)$"
+# html/ 配下の PHP
+RedirectMatch 404 "^/html/.*\.php$"
+EOF
+RUN a2enconf hide-files
 
 # Set recommended production PHP.ini
 RUN cp "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini"
@@ -129,4 +147,12 @@ RUN set -eux; \
 # --chown 付き COPY なら chown 用の追加レイヤーが発生しない
 COPY --from=eccube --chown=www-data:www-data /app /var/www/html
 
+# .env は使わず環境変数で設定する (DATABASE_URL, ECCUBE_AUTH_MAGIC は起動時に必須)
+ENV APP_ENV=prod \
+    APP_DEBUG=0
+
+COPY --chmod=755 eccube-entrypoint.sh /usr/local/bin/eccube-entrypoint
+
 EXPOSE 80
+ENTRYPOINT ["eccube-entrypoint"]
+CMD ["apache2-foreground"]

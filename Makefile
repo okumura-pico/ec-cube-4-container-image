@@ -6,6 +6,7 @@ TAG           ?= $(ECCUBE)
 
 CONTAINER     ?= eccube
 PORT          ?= 8080
+ENV_FILE      ?= eccube.env
 
 BUILD_ARGS = --build-arg PHP=$(PHP) \
              --build-arg ECCUBE=$(ECCUBE) \
@@ -25,8 +26,9 @@ build: ## イメージをビルド (IMAGE:TAG と IMAGE:latest)
 rebuild: ## キャッシュを使わずにビルド (ベースイメージも再取得)
 	docker build --pull --no-cache $(BUILD_ARGS) -t $(IMAGE):$(TAG) -t $(IMAGE):latest .
 
-run: stop ## コンテナを起動 (http://localhost:PORT/)
-	docker run -d --name $(CONTAINER) -p $(PORT):80 $(IMAGE):$(TAG)
+run: stop ## コンテナを起動 (ENV_FILE の環境変数を使用, http://localhost:PORT/)
+	@test -f $(ENV_FILE) || { echo "$(ENV_FILE) がありません (eccube.env.sample をコピーして作成)"; exit 1; }
+	docker run -d --name $(CONTAINER) -p $(PORT):80 --env-file $(ENV_FILE) $(IMAGE):$(TAG)
 	@echo "http://localhost:$(PORT)/"
 
 stop: ## コンテナを停止・削除
