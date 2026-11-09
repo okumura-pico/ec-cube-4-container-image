@@ -2,6 +2,8 @@
 # EC-CUBE 4.3 は PHP 8.1〜8.3 をサポート (8-apache だと 8.4 以降になるため明示)
 ARG PHP=8.3-apache
 ARG ECCUBE=4.3.1-p1
+# ECCUBE を変更した場合は tar.gz の sha256 も合わせて変更すること
+ARG ECCUBE_SHA256=5783ae3598a902a4bce1d59ea8592281f02f5306d253944dfb45c8cb58680ab4
 
 # -------------------------------------------
 # PHP extension build stage
@@ -15,18 +17,72 @@ RUN set -eux; \
     docker-php-ext-install -j"$(nproc)" mysqli gd zip intl pdo_mysql opcache
 
 # -------------------------------------------
+# EC-CUBE build stage (download + composer install --no-dev)
+#
+FROM php-ext AS eccube
+
+# FROM より前の ARG はステージ内では使えないので再宣言
+ARG ECCUBE
+ARG ECCUBE_SHA256
+
+COPY --from=composer:2 /usr/bin/composer /usr/local/bin/composer
+
+ADD --checksum=sha256:${ECCUBE_SHA256} \
+    https://github.com/EC-CUBE/ec-cube/releases/download/${ECCUBE}/eccube-${ECCUBE}.tar.gz \
+    /tmp/eccube.tar.gz
+
+# 同梱プラグイン (type: eccube-plugin, tar ball の app/Plugin 配下に展開済み) は
+# ec-cube/plugin-installer が composer からのインストールを拒否するため、
+# composer.lock から「インストール済み」として vendor/composer/installed.json を作っておく。
+# plugin-installer 自体も先に入れておかないと app/Plugin 配下を認識できない。
+COPY <<'EOF' /usr/local/bin/seed-installed.php
+<?php
+$lock = json_decode(file_get_contents('composer.lock'), true);
+$packages = [];
+foreach ($lock['packages'] as $p) {
+    if ($p['type'] === 'eccube-plugin') {
+        $p['install-path'] = '../../app/Plugin/' . $p['extra']['code'];
+        $packages[] = $p;
+    } elseif ($p['name'] === 'ec-cube/plugin-installer') {
+        $p['install-path'] = '../ec-cube/plugin-installer';
+        $packages[] = $p;
+        echo $p['version'];
+    }
+}
+@mkdir('vendor/composer', 0755, true);
+file_put_contents('vendor/composer/installed.json', json_encode(
+    ['packages' => $packages, 'dev' => false, 'dev-package-names' => []],
+    JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES
+));
+EOF
+
+WORKDIR /app
+ENV COMPOSER_ALLOW_SUPERUSER=1
+RUN set -eux; \
+    tar xzf /tmp/eccube.tar.gz --strip-components=1 --no-same-owner --exclude='ec-cube/vendor'; \
+    rm -rf .devcontainer dockerbuild gulp Dockerfile docker-compose*.yml .dockerignore \
+           babel.config.json gulpfile.js webpack.config.js package.json package-lock.json \
+           nginx.conf.sample web.config; \
+    PI_VERSION="$(php /usr/local/bin/seed-installed.php)"; \
+    mkdir /tmp/pi; echo '{}' > /tmp/pi/composer.json; \
+    composer --working-dir=/tmp/pi require --no-plugins --no-scripts --no-interaction --no-progress "ec-cube/plugin-installer:${PI_VERSION}"; \
+    mkdir -p vendor/ec-cube; \
+    mv /tmp/pi/vendor/ec-cube/plugin-installer vendor/ec-cube/; \
+    # google/apiclient-services (約 185MB) は SiteKit42 が使うサービスだけ残す (google/apiclient 公式の cleanup 機能)
+    composer config extra.google/apiclient-services --json '["SiteVerification", "Webmasters"]'; \
+    composer config scripts.pre-autoload-dump 'Google\Task\Composer::cleanup'; \
+    composer install --no-dev --optimize-autoloader --no-interaction --no-progress; \
+    # post-install スクリプトが作る .env / sqlite DB を消して初回アクセス時にインストーラを起動させる
+    rm -rf .env var/eccube.db var/cache/* var/log/* app/Plugin/.composer/cache/*
+
+# -------------------------------------------
 # Live stage
 #
 FROM php:${PHP}
 
-# FROM より前の ARG はステージ内では使えないので再宣言
-ARG ECCUBE
-
 RUN set -eux; \
     apt-get update; \
-    apt-get upgrade -y; \
     apt-get install -y --no-install-recommends libfreetype6 libjpeg62-turbo libpng16-16t64 libwebp7 libzip5 libicu76; \
-    apt-get clean; \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=php-ext /usr/local/lib/php/extensions/ /usr/local/lib/php/extensions/
@@ -70,15 +126,7 @@ RUN set -eux; \
       -e 's|^max_execution_time = .*|max_execution_time = 120|' \
       "$PHP_INI_DIR/php.ini"
 
-# Extract EC-CUBE (tarball has vendor/ bundled, so composer install is not needed)
-#   ビルドコンテキストの eccube-${ECCUBE}.tar.gz を使用
-WORKDIR /var/www/html
-RUN --mount=type=bind,source=eccube-${ECCUBE}.tar.gz,target=/tmp/eccube.tar.gz \
-    set -eux; \
-    tar xzf /tmp/eccube.tar.gz --strip-components=1 --no-same-owner; \
-    rm -rf .devcontainer dockerbuild gulp Dockerfile docker-compose*.yml \
-           babel.config.json gulpfile.js webpack.config.js package.json package-lock.json \
-           nginx.conf.sample web.config; \
-    chown -R www-data:www-data /var/www/html
+# --chown 付き COPY なら chown 用の追加レイヤーが発生しない
+COPY --from=eccube --chown=www-data:www-data /app /var/www/html
 
 EXPOSE 80
